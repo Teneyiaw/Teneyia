@@ -1,1 +1,108 @@
+import pandas as pd
+from netmiko import ConnectHandler
+from getpass import getpass
+import os
+from datetime import datetime
 
+# === Network path for backups ===
+base_path = r"\\fileshares\IT\!Adcom Network & Systems\Backup Config- Script"
+
+# === Create monthly folder with month name ===
+current_month = datetime.now().strftime("%B-%Y")  # Example: September-2025
+output_dir = os.path.join(base_path, current_month)
+os.makedirs(output_dir, exist_ok=True)
+
+# === Excel file and log file paths ===
+excel_file = os.path.join(base_path, "devices.xlsx")
+log_file = os.path.join(base_path, "config_log.txt")
+
+# === Check if Excel file exists ===
+if not os.path.exists(excel_file):
+    print(f"ERROR: Excel file not found at {excel_file}")
+    input("Press Enter to exit...")
+    exit()
+
+# === Load devices from Excel ===
+df = pd.read_excel(excel_file)
+
+# === Get primary credentials ===
+print("Enter PRIMARY credentials for devices:")
+primary_username = input("Username: ")
+primary_password = getpass("Password: ")
+primary_enable = getpass("Enable secret (or press Enter if none): ")
+
+# === Get secondary credentials (for retry) ===
+print("\nEnter SECONDARY credentials for retrying failed devices:")
+secondary_username = input("Username: ")
+secondary_password = getpass("Password: ")
+secondary_enable = getpass("Enable secret (or press Enter if none): ")
+
+# === Prepare logging ===
+with open(log_file, "a") as log:
+    log.write("\n=== Run started at {} ===\n".format(datetime.now()))
+
+# === Helper function to connect and get config ===
+def get_config(ip, hostname, username, password, enable_secret):
+    try:
+        device = {
+            "device_type": "cisco_ios",
+            "host": ip,
+            "username": username,
+            "password": password,
+            "secret": enable_secret if enable_secret else password
+        }
+        connection = ConnectHandler(**device)
+        connection.enable()
+        running_config = connection.send_command("show running-config")
+
+        filename = os.path.join(output_dir, f"{hostname}.txt")
+        with open(filename, "w") as f:
+            f.write(running_config)
+
+        print(f"[OK] Saved config for {hostname} -> {filename}")
+        with open(log_file, "a") as log:
+            log.write(f"[SUCCESS] {hostname} ({ip})\n")
+
+        connection.disconnect()
+        return True
+
+    except Exception as e:
+        print(f"[FAILED] {hostname} ({ip}): {e}")
+        with open(log_file, "a") as log:
+            log.write(f"[FAILED] {hostname} ({ip}) - {e}\n")
+        return False
+
+# === First pass with primary credentials ===
+failed_devices = []
+success_count = 0
+fail_count = 0
+
+for index, row in df.iterrows():
+    ip = str(row[0]).strip()
+    hostname = str(row[1]).strip()
+    print(f"\nConnecting to {hostname} ({ip}) with PRIMARY credentials...")
+    success = get_config(ip, hostname, primary_username, primary_password, primary_enable)
+    if success:
+        success_count += 1
+    else:
+        fail_count += 1
+        failed_devices.append((ip, hostname))
+
+# === Retry failed devices with secondary credentials ===
+if failed_devices:
+    print("\n=== Retrying failed devices with SECONDARY credentials ===")
+    for ip, hostname in failed_devices:
+        print(f"\nRetrying {hostname} ({ip}) with SECONDARY credentials...")
+        success = get_config(ip, hostname, secondary_username, secondary_password, secondary_enable)
+        if success:
+            success_count += 1
+            fail_count -= 1  # Reduce fail count if retry succeeds
+
+# === Summary ===
+print("\n=== Summary ===")
+print(f"Successful: {success_count}")
+print(f"Failed: {fail_count}")
+print(f"Configs saved in: {output_dir}")
+print(f"Log file: {log_file}")
+
+input("\nPress Enter to exit...")
